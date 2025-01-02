@@ -1,53 +1,71 @@
-name: Deploy React App to S3 and CloudFront
+name: Build and Deploy to AWS S3
 
 on:
   push:
     branches:
-      - main  # Trigger the workflow on push to the main branch
+      - main  # You can modify this to match your production branch name
 
 jobs:
-  deploy:
+  Build_Node:
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1: Checkout the repository
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Step 2: Set up Node.js (for building the React app)
-      - name: Set up Node.js
-        uses: actions/setup-node@v2
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'  # Set Node.js version to 18.x
+          node-version: '18.x'
 
-      # Step 3: Cache Node.js dependencies (optional)
-      - name: Cache Node.js dependencies
-        uses: actions/cache@v2
+      - name: Install Dependencies
+        run: |
+          yarn install
+          rm -rf ./dist    # Clear old build
+          yarn build       # Generate the build in 'dist'
+
+      - name: Check if dist folder exists
+        run: |
+          if [ ! -d "./dist" ]; then
+            echo "Build failed. dist folder does not exist."
+            exit 1
+          fi
+
+      - name: Check build folder (debugging)
+        run: ls -al ./dist   # List the dist folder contents
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
+          name: NODE_FILES
+          path: ./dist    # Make sure you're uploading the correct directory
 
-      # Step 4: Install dependencies and build the React app
-      - name: Install dependencies and build the React app
-        run: |
-          npm install  # Install dependencies
-          npm run build  # Build the React app
-          ls -al ./build  # List contents of build directory for debugging
+  Deploy_To_react2_S3:
+    runs-on: ubuntu-latest
+    needs: Build_Node    # Depends on successful completion of the Build_Node job
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: NODE_FILES
+          path: ./dist    # Make sure you're downloading the correct artifact
 
-      # Step 5: Deploy to S3
-      - name: Deploy to S3
-        run: |
-          aws s3 sync $PWD/build/ s3://react1-s3-bucket --delete --region eu-north-1
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - run: aws s3 sync ./dist s3://react2-s3-bucket 
+
+  Invalidate_Cloudfront_Cache:
+    runs-on: ubuntu-latest
+    needs: Deploy_To_react2_S3    # Depends on the Deploy_To_react2_S3 job
+    steps:
+      - name: Invalidate CloudFront
+        uses: chetan/invalidate-cloudfront-action@v2
         env:
+          DISTRIBUTION: "EE2PZ7411EKIW"    # CloudFront distribution ID
+          PATHS: "/*"  # You can optimize this to only invalidate changed files
+          AWS_REGION: eu-north-1
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      # Step 6: Invalidate CloudFront cache
-      - name: Invalidate CloudFront cache
-        run: |
-          aws cloudfront create-invalidation --distribution-id E274GZPMVVLH7M --paths "/*" --region eu-north-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
